@@ -382,6 +382,12 @@ const newCommands: ApiCommand[] = [
 			return undefined;
 		})
 	),
+	// --- structural diff
+	new ApiCommand(
+		'vscode.executeStructuralDiffProvider', '_executeStructuralDiffProvider', 'Execute structural diff provider.',
+		[ApiCommandArgument.Uri.with('original', 'Uri of the original text document'), ApiCommandArgument.Uri.with('modified', 'Uri of the modified text document')],
+		new ApiCommandResult<languages.StructuralDiffResult | undefined, vscode.StructuralDiffResult | undefined>('A promise that resolves to a StructuralDiffResult, or undefined when no provider supplies a result.', result => result ? typeConverters.StructuralDiff.to(result) : undefined)
+	),
 
 	// --- notebooks
 	new ApiCommand(
@@ -561,15 +567,16 @@ const newCommands: ApiCommand[] = [
 	new ApiCommand(
 		'vscode.extensionPromptFileProvider', '_listExtensionPromptFiles', 'Get all extension-contributed prompt files (custom agents, instructions, and prompt files).',
 		[],
-		new ApiCommandResult<IExtensionPromptFileResult[], { uri: vscode.Uri; type: PromptsType }[]>(
-			'A promise that resolves to an array of objects containing uri and type.',
+		new ApiCommandResult<IExtensionPromptFileResult[], { uri: vscode.Uri; type: PromptsType; extensionId: string }[]>(
+			'A promise that resolves to an array of objects containing uri, type, and extensionId.',
 			(value) => {
 				if (!value) {
 					return [];
 				}
 				return value.map(item => ({
 					uri: URI.revive(item.uri),
-					type: item.type
+					type: item.type,
+					extensionId: item.extensionId
 				}));
 			}
 		)

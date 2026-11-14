@@ -4,6 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { UriComponents } from '../../../../base/common/uri.js';
+import { RepositoryRef } from '../../../../platform/github/common/client/types.js';
+import { CreateIssueRequest } from '../../../../platform/github/common/core/issues.js';
+import { GitHubAuthorizationContext } from '../../../../platform/github/common/githubTypes.js';
 import { createDecorator } from '../../../../platform/instantiation/common/instantiation.js';
 
 // Since data sent through the service is serialized to JSON, functions will be lost, so Color objects
@@ -25,9 +28,19 @@ export const enum IssueType {
 
 export enum IssueSource {
 	VSCode = 'vscode',
+	AgentsWindow = 'agentsWindow',
 	Extension = 'extension',
-	Marketplace = 'marketplace'
+	Marketplace = 'marketplace',
+	Unknown = 'unknown'
 }
+
+export const issueReporterLayoutSettingId = 'issueReporter.wizard.layout';
+
+/**
+ * How the new issue reporter asks for a report. Simple asks for screenshots and a description and
+ * leaves the rest to defaults. Detailed also asks for the target, category, title, and diagnostics.
+ */
+export type IssueReporterLayout = 'simple' | 'detailed';
 
 export interface IssueReporterStyles extends WindowStyles {
 	textLinkColor?: string;
@@ -61,24 +74,47 @@ export interface IssueReporterExtensionData {
 	extensionTemplate?: string;
 	data?: string;
 	uri?: UriComponents;
+	/** An optional internal destination, not the default destination. */
 	privateUri?: UriComponents;
 }
 
 export interface IssueReporterData extends WindowData {
 	styles: IssueReporterStyles;
 	enabledExtensions: IssueReporterExtensionData[];
+	/**
+	 * Resolves once `enabledExtensions` has been populated (or failed to populate).
+	 * Lets the reporter pane wait for the async extension enumeration in
+	 * `NativeIssueService` to finish before rendering the extensions section.
+	 */
+	whenExtensionsLoaded?: Promise<void>;
+	/**
+	 * Resolves once all async data (extensions, token, integrity, experiments)
+	 * has been populated. Lets the reporter pane forward late-arriving values
+	 * like `isInstallationPure` and `githubAccessToken` into the overlay model.
+	 */
+	whenDataComplete?: Promise<void>;
 	issueType?: IssueType;
 	issueSource?: IssueSource;
 	extensionId?: string;
 	experiments?: string;
 	restrictedMode: boolean;
-	isUnsupported: boolean;
+	isInstallationPure: boolean;
+	isSessionsWindow: boolean;
 	githubAccessToken: string;
+	/** The selected grant for classic issue creation, independent of token renewal. */
+	githubAuthorization?: GitHubAuthorizationContext;
+	/** Refreshes an automatically selected GitHub session before a new reporter preview. */
+	getGitHubAccessToken?: () => Promise<string>;
 	issueTitle?: string;
 	issueBody?: string;
 	data?: string;
 	uri?: UriComponents;
+	/** An optional internal destination, not the default destination. */
 	privateUri?: UriComponents;
+	/** Additional product-report destinations, in owner/repo form. */
+	additionalRepositories?: readonly string[];
+	/** The user's repository choice, independent of the issue source. */
+	issueRepository?: string;
 }
 
 export interface ISettingSearchResult {
@@ -88,6 +124,42 @@ export interface ISettingSearchResult {
 }
 
 export const IIssueFormService = createDecorator<IIssueFormService>('issueFormService');
+
+export interface IIssueReporterFileAttachment {
+	readonly filePath: string;
+	readonly name: string;
+	readonly mimeType: string;
+	readonly thumbnailDataUrl?: string;
+	readonly durationMs?: number;
+}
+
+export interface IIssueReporterScreenshot {
+	readonly dataUrl: string;
+	readonly annotatedDataUrl?: string;
+	/** The name of the image file that the screenshot was marked up from, which it keeps instead of a numbered name. */
+	readonly name?: string;
+}
+
+export interface IIssueReporterAttachmentUpload {
+	readonly destination: string;
+	readonly state: 'pending' | 'uploading' | 'done';
+}
+
+export type IssueReporterAttachment<TScreenshot extends IIssueReporterScreenshot = IIssueReporterScreenshot> = {
+	readonly id: string;
+	upload?: IIssueReporterAttachmentUpload;
+} & (
+		| { readonly kind: 'screenshot'; readonly screenshot: TScreenshot }
+		| { readonly kind: 'file'; readonly file: IIssueReporterFileAttachment }
+	);
+
+/** The new reporter's attachment and upload feedback contract. */
+export interface IIssueSubmissionHost {
+	getAttachments(): readonly IssueReporterAttachment[];
+	setUploading(uploading: boolean): void;
+	setAttachmentUploadState(attachment: IssueReporterAttachment, upload: IIssueReporterAttachmentUpload): void;
+	setAttachmentUploadError(message: string | undefined, details?: string): void;
+}
 
 export interface IIssueFormService {
 	readonly _serviceBrand: undefined;
@@ -99,6 +171,15 @@ export interface IIssueFormService {
 	showClipboardDialog(): Promise<boolean>;
 	sendReporterMenu(extensionId: string): Promise<IssueReporterData | undefined>;
 	closeReporter(): Promise<void>;
+	submitIssue(host: IIssueSubmissionHost, data: IssueReporterData, title: string, body: string, signal?: AbortSignal): Promise<boolean>;
+	searchGitHubIssues(repo: string, title: string, signal: AbortSignal): Promise<readonly ISimilarIssue[]>;
+	createGitHubIssue(authorization: GitHubAuthorizationContext, repository: RepositoryRef, request: CreateIssueRequest, signal: AbortSignal): Promise<string>;
+}
+
+export interface ISimilarIssue {
+	readonly html_url: string;
+	readonly title: string;
+	readonly state?: string;
 }
 
 export const IWorkbenchIssueService = createDecorator<IWorkbenchIssueService>('workbenchIssueService');

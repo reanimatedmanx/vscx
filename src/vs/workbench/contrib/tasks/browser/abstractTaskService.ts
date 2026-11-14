@@ -50,7 +50,7 @@ import { ITerminalProfileResolverService } from '../../terminal/common/terminal.
 import { CommandString, ConfiguringTask, ContributedTask, CustomTask, ExecutionEngine, InMemoryTask, InstancePolicy, ITaskConfig, ITaskEvent, ITaskIdentifier, ITaskInactiveEvent, ITaskProcessEndedEvent, ITaskSet, JsonSchemaVersion, KeyedTaskIdentifier, RerunAllRunningTasksCommandId, RuntimeType, Task, TASK_RUNNING_STATE, TaskDefinition, TaskEventKind, TaskGroup, TaskRunSource, TaskSettingId, TaskSorter, TaskSourceKind, TasksSchemaProperties, USER_TASKS_GROUP_KEY } from '../common/tasks.js';
 import { ChatAgentLocation, ChatModeKind } from '../../chat/common/constants.js';
 import { CustomExecutionSupportedContext, ICustomizationProperties, IProblemMatcherRunOptions, ITaskFilter, ITaskProvider, ITaskService, IWorkspaceFolderTaskResult, ProcessExecutionSupportedContext, ServerlessWebContext, ShellExecutionSupportedContext, TaskCommandsRegistered, TaskExecutionSupportedContext, TasksAvailableContext } from '../common/taskService.js';
-import { ITaskExecuteResult, ITaskResolver, ITaskSummary, ITaskSystem, ITaskSystemInfo, ITaskTerminateResponse, TaskError, TaskErrors, TaskExecuteKind, Triggers, VerifiedTask } from '../common/taskSystem.js';
+import { assertTaskWorkspaceTrust, ITaskExecuteResult, ITaskResolver, ITaskSummary, ITaskSystem, ITaskSystemInfo, ITaskTerminateResponse, TaskError, TaskErrors, TaskExecuteKind, Triggers, VerifiedTask } from '../common/taskSystem.js';
 import { getTemplates as getTaskTemplates } from '../common/taskTemplates.js';
 
 import * as TaskConfig from '../common/taskConfiguration.js';
@@ -301,7 +301,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 		@IHostService private readonly _hostService: IHostService
 	) {
 		super();
-		this._whenTaskSystemReady = Event.toPromise(this.onDidChangeTaskSystemInfo);
+		this._whenTaskSystemReady = Event.toPromise(Event.filter(this.onDidChangeTaskSystemInfo, () => this.hasTaskSystemInfo), this._store);
 		this._workspaceTasksPromise = undefined;
 		this._taskSystem = undefined;
 		this._taskSystemListeners = undefined;
@@ -310,12 +310,16 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 		this._providerTypes = new Map<number, string>();
 		this._taskSystemInfos = new Map<string, ITaskSystemInfo[]>();
 		this._register(this._contextService.onDidChangeWorkspaceFolders(() => {
+			const taskServiceInitialized = !!this._taskSystem || !!this._workspaceTasksPromise;
 			const folderSetup = this._computeWorkspaceFolderSetup();
 			if (this.executionEngine !== folderSetup[2]) {
 				this._disposeTaskSystemListeners();
 				this._taskSystem = undefined;
 			}
 			this._updateSetup(folderSetup);
+			if (!taskServiceInitialized) {
+				return;
+			}
 			return this._updateWorkspaceTasks(TaskRunSource.FolderOpen);
 		}));
 		this._register(this._configurationService.onDidChangeConfiguration(async (e) => {
@@ -2064,7 +2068,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 				return false;
 			}
 		}
-		await this._editorService.saveAll({ reason: SaveReason.AUTO });
+		await this._editorService.saveAll({ reason: SaveReason.EXPLICIT });
 		return true;
 	}
 
@@ -2083,6 +2087,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 				? await this.getTask(taskFolder, taskIdentifier, false, taskType) : task) ?? task;
 		}
 		await ProblemMatcherRegistry.onReady();
+		assertTaskWorkspaceTrust(this._workspaceTrustManagementService);
 		const executeResult = runSource === TaskRunSource.Reconnect ? this._getTaskSystem().reconnect(taskToRun, resolver) : this._getTaskSystem().run(taskToRun, resolver);
 		if (executeResult) {
 			return this._handleExecuteResult(executeResult, runSource);
@@ -2132,7 +2137,10 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 				this._notificationService.warn(nls.localize('TaskSystem.InstancePolicy.warn', 'The instance limit for this task has been reached.'));
 				break;
 			case InstancePolicy.prompt:
-			default:
+			default: {
+				if (this._environmentService.isSessionsWindow) {
+					this._logService.warn(`[tasks] InstancePolicy.prompt hit in sessions window for task '${task._label}'\n${new Error().stack}`);
+				}
 				this._showQuickPick(this._taskSystem!.getActiveTasks().filter(t => task._id === t._id),
 					nls.localize('TaskService.instanceToTerminate', 'Select an instance to terminate'),
 					{
@@ -2148,6 +2156,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 					}
 					this._restart(task);
 				});
+			}
 		}
 	}
 
@@ -2281,7 +2290,8 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 					}
 				}
 				return undefined;
-			}
+			},
+			this._workspaceTrustManagementService
 		);
 	}
 
@@ -2306,15 +2316,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 		const contributedTaskSets = await new Promise<ITaskSet[]>(resolve => {
 			const result: ITaskSet[] = [];
 			let counter: number = 0;
-			const done = (value: ITaskSet | undefined) => {
-				if (value) {
-					result.push(value);
-				}
-				if (--counter === 0) {
-					resolve(result);
-				}
-			};
-			const error = (error: unknown) => {
+			const error = (error: unknown, done: () => void) => {
 				try {
 					if (!isCancellationError(error)) {
 						if (error && Types.isString((error as { message?: string }).message)) {
@@ -2326,9 +2328,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 						}
 					}
 				} finally {
-					if (--counter === 0) {
-						resolve(result);
-					}
+					done();
 				}
 			};
 			if (this._isProvideTasksEnabled() && (this.schemaVersion === JsonSchemaVersion.V2_0_0) && (this._providers.size > 0)) {
@@ -2341,6 +2341,19 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 						}
 						foundAnyProviders = true;
 						counter++;
+						let completed = false;
+						const done = (value: ITaskSet | undefined) => {
+							if (value) {
+								result.push(value);
+							}
+							// A provider can settle after its timeout, but must only finish its own accounting once.
+							if (!completed) {
+								completed = true;
+								if (--counter === 0) {
+									resolve(result);
+								}
+							}
+						};
 						raceTimeout(provider.provideTasks(validTypes).then((taskSet: ITaskSet) => {
 							// Check that the tasks provided are of the correct type
 							for (const task of taskSet.tasks) {
@@ -2353,7 +2366,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 								}
 							}
 							return done(taskSet);
-						}, error), 5000, () => {
+						}, err => error(err, () => done(undefined))), 5000, () => {
 							// onTimeout
 							done(undefined);
 						});
@@ -2629,8 +2642,9 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 		await ProblemMatcherRegistry.onReady();
 		const taskSystemInfo: ITaskSystemInfo | undefined = this._getTaskSystemInfo(workspaceFolder.uri.scheme);
 		const problemReporter = new ProblemReporter(this._outputChannel);
-		this._register(problemReporter.onDidError(error => this._showOutput(runSource, undefined, error)));
+		const problemReporterListener = problemReporter.onDidError(error => this._showOutput(runSource, undefined, error));
 		const parseResult = TaskConfig.parse(workspaceFolder, undefined, taskSystemInfo ? taskSystemInfo.platform : Platform.platform, workspaceFolderConfiguration.config, problemReporter, TaskConfig.TaskConfigSource.TasksJson, this._contextKeyService);
+		problemReporterListener.dispose();
 		let hasErrors = false;
 		if (!parseResult.validationStatus.isOK() && (parseResult.validationStatus.state !== ValidationState.Info)) {
 			hasErrors = true;
@@ -3230,7 +3244,7 @@ export abstract class AbstractTaskService extends Disposable implements ITaskSer
 	private _reRunTaskCommand(onlyRerun?: boolean): void {
 
 		ProblemMatcherRegistry.onReady().then(() => {
-			return this._editorService.saveAll({ reason: SaveReason.AUTO }).then(() => { // make sure all dirty editors are saved
+			return this._editorService.saveAll({ reason: SaveReason.EXPLICIT }).then(() => { // make sure all dirty editors are saved
 				const executeResult = this._getTaskSystem().rerun();
 				if (executeResult) {
 					return this._handleExecuteResult(executeResult);

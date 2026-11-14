@@ -14,6 +14,7 @@ import { ILabelService } from '../../../../platform/label/common/label.js';
 import { Schemas } from '../../../../base/common/network.js';
 import { IOpenerService } from '../../../../platform/opener/common/opener.js';
 import { IEditorService, SIDE_GROUP, ACTIVE_GROUP } from '../../../services/editor/common/editorService.js';
+import { IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { Range } from '../../../../editor/common/core/range.js';
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { IWorkbenchEditorConfiguration } from '../../../common/editor.js';
@@ -24,6 +25,8 @@ import { prepareQuery, IPreparedQuery, scoreFuzzy2, pieceToQuery } from '../../.
 import { IMatch } from '../../../../base/common/filters.js';
 import { Codicon } from '../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
+import { IChatWidgetService } from '../../chat/browser/chat.js';
+import { ISymbolVariableEntry } from '../../chat/common/attachments/chatVariableEntries.js';
 
 export interface ISymbolQuickPickItem extends IPickerQuickAccessItem, IQuickPickItemWithResource {
 	score?: number;
@@ -64,7 +67,9 @@ export class SymbolsQuickAccessProvider extends PickerQuickAccessProvider<ISymbo
 		@IOpenerService private readonly openerService: IOpenerService,
 		@IEditorService private readonly editorService: IEditorService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
-		@ICodeEditorService private readonly codeEditorService: ICodeEditorService
+		@ICodeEditorService private readonly codeEditorService: ICodeEditorService,
+		@IChatWidgetService private readonly chatWidgetService: IChatWidgetService,
+		@IEditorGroupsService private readonly editorGroupService: IEditorGroupsService
 	) {
 		super(SymbolsQuickAccessProvider.PREFIX, {
 			canAcceptInBackground: true,
@@ -199,18 +204,38 @@ export class SymbolsQuickAccessProvider extends PickerQuickAccessProvider<ISymbo
 				},
 				description: containerLabel,
 				strikethrough: deprecated,
-				buttons: [
+				buttons: this.editorGroupService.supportsSplitting ? [
 					{
 						iconClass: openSideBySideDirection === 'right' ? ThemeIcon.asClassName(Codicon.splitHorizontal) : ThemeIcon.asClassName(Codicon.splitVertical),
 						tooltip: openSideBySideDirection === 'right' ? localize('openToSide', "Open to the Side") : localize('openToBottom', "Open to the Bottom")
 					}
-				],
+				] : undefined,
 				trigger: (buttonIndex, keyMods) => {
 					this.openSymbol(provider, symbol, token, { keyMods, forceOpenSideBySide: true });
 
 					return TriggerAction.CLOSE_PICKER;
 				},
 				accept: async (keyMods, event) => this.openSymbol(provider, symbol, token, { keyMods, preserveFocus: event.inBackground, forcePinned: event.inBackground }),
+				attach: (keyMods, event) => {
+					// Only support adding context to chat when shift is pressed
+					if (keyMods.shift) {
+						const widget = this.chatWidgetService.lastFocusedWidget;
+						if (widget) {
+							const entry: ISymbolVariableEntry = {
+								kind: 'symbol',
+								id: JSON.stringify({ uri: symbolUri.toString(), range: symbol.location.range }),
+								name: symbol.name,
+								value: symbol.location,
+								symbolKind: symbol.kind,
+							};
+							widget.attachmentModel.addContext(entry);
+						}
+						return;
+					}
+
+					// Fallback to accept behavior.
+					this.openSymbol(provider, symbol, token, { keyMods, preserveFocus: event.inBackground, forcePinned: event.inBackground });
+				},
 			});
 
 		}
@@ -242,6 +267,7 @@ export class SymbolsQuickAccessProvider extends PickerQuickAccessProvider<ISymbo
 
 		// Otherwise open as editor
 		else {
+			const openToSide = this.editorGroupService.supportsSplitting && (options.keyMods.alt || (this.configuration.openEditorPinned && options.keyMods.ctrlCmd) || options?.forceOpenSideBySide);
 			await this.editorService.openEditor({
 				resource: symbolToOpen.location.uri,
 				options: {
@@ -249,7 +275,7 @@ export class SymbolsQuickAccessProvider extends PickerQuickAccessProvider<ISymbo
 					pinned: options.keyMods.ctrlCmd || options.forcePinned || this.configuration.openEditorPinned,
 					selection: symbolToOpen.location.range ? Range.collapseToStart(symbolToOpen.location.range) : undefined
 				}
-			}, options.keyMods.alt || (this.configuration.openEditorPinned && options.keyMods.ctrlCmd) || options?.forceOpenSideBySide ? SIDE_GROUP : ACTIVE_GROUP);
+			}, openToSide ? SIDE_GROUP : ACTIVE_GROUP);
 		}
 	}
 

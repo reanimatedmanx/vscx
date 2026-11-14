@@ -15,7 +15,6 @@ import { INotificationsCenterController, NotificationActionRunner } from './noti
 import { NotificationsList } from './notificationsList.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { $, Dimension, isAncestorOfActiveElement } from '../../../../base/browser/dom.js';
-import { widgetShadow } from '../../../../platform/theme/common/colorRegistry.js';
 import { IEditorGroupsService } from '../../../services/editor/common/editorGroupsService.js';
 import { localize } from '../../../../nls.js';
 import { ActionBar } from '../../../../base/browser/ui/actionbar/actionbar.js';
@@ -34,6 +33,9 @@ import { AccessibilitySignal, IAccessibilitySignalService } from '../../../../pl
 import { IConfigurationService } from '../../../../platform/configuration/common/configuration.js';
 import { DEFAULT_CUSTOM_TITLEBAR_HEIGHT } from '../../../../platform/window/common/window.js';
 import { ThemeIcon } from '../../../../base/common/themables.js';
+import { onDidChangeNotificationRowHeight } from './notificationsViewer.js';
+import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
+import { logNotificationInteraction } from '../../../common/notificationTelemetry.js';
 
 export class NotificationsCenter extends Themable implements INotificationsCenterController {
 
@@ -68,7 +70,8 @@ export class NotificationsCenter extends Themable implements INotificationsCente
 		@IAccessibilitySignalService private readonly accessibilitySignalService: IAccessibilitySignalService,
 		@IContextMenuService private readonly contextMenuService: IContextMenuService,
 		@IConfigurationService private readonly configurationService: IConfigurationService,
-		@IMenuService private readonly menuService: IMenuService
+		@IMenuService private readonly menuService: IMenuService,
+		@ITelemetryService private readonly telemetryService: ITelemetryService
 	) {
 		super(themeService);
 
@@ -178,6 +181,7 @@ export class NotificationsCenter extends Themable implements INotificationsCente
 
 		// Mark as visible
 		this.model.notifications.forEach(notification => notification.updateVisibility(true));
+		notificationsList.setTelemetryVisibility(true);
 
 		// Context Key
 		this.notificationsCenterVisibleContextKey.set(true);
@@ -194,7 +198,7 @@ export class NotificationsCenter extends Themable implements INotificationsCente
 			clearAllAction.enabled = false;
 		} else {
 			notificationsCenterTitle.textContent = localize('notifications', "Notifications");
-			clearAllAction.enabled = this.model.notifications.some(notification => !notification.hasProgress);
+			clearAllAction.enabled = this.model.notifications.some(notification => !notification.hasActiveProgress);
 		}
 	}
 
@@ -218,7 +222,7 @@ export class NotificationsCenter extends Themable implements INotificationsCente
 		const toolbarContainer = $('.notifications-center-header-toolbar');
 		this.notificationsCenterHeader.appendChild(toolbarContainer);
 
-		const actionRunner = this._register(this.instantiationService.createInstance(NotificationActionRunner));
+		const actionRunner = this._register(this.instantiationService.createInstance(NotificationActionRunner, 'center'));
 
 		const that = this;
 		const notificationsToolBar = this._register(new ActionBar(toolbarContainer, {
@@ -295,9 +299,11 @@ export class NotificationsCenter extends Themable implements INotificationsCente
 		notificationsToolBar.push(this.hideAction, { icon: true, label: false, keybinding: this.getKeybindingLabel(this.hideAction) });
 
 		// Notifications List
-		this.notificationsList = this.instantiationService.createInstance(NotificationsList, this.notificationsCenterContainer, {
+		this.notificationsList = this._register(this.instantiationService.createInstance(NotificationsList, this.notificationsCenterContainer, {
+			telemetrySurface: 'center',
 			widgetAriaLabel: localize('notificationsCenterWidgetAriaLabel', "Notifications Center")
-		});
+		}));
+		this._register(onDidChangeNotificationRowHeight(() => this.notificationsList?.updateNotificationHeights()));
 		this.container.appendChild(this.notificationsCenterContainer);
 	}
 
@@ -332,6 +338,11 @@ export class NotificationsCenter extends Themable implements INotificationsCente
 					case NotificationViewItemContentChangeKind.MESSAGE:
 						if (e.item.expanded) {
 							notificationsList.updateNotificationHeight(e.item);
+						}
+						break;
+					case NotificationViewItemContentChangeKind.PROGRESS:
+						if (e.activeProgressChanged) {
+							notificationsList.updateNotificationsList(e.index, 1, [e.item]);
 						}
 						break;
 				}
@@ -390,8 +401,6 @@ export class NotificationsCenter extends Themable implements INotificationsCente
 
 	override updateStyles(): void {
 		if (this.notificationsCenterContainer && this.notificationsCenterHeader) {
-			const widgetShadowColor = this.getColor(widgetShadow);
-			this.notificationsCenterContainer.style.boxShadow = widgetShadowColor ? `0 0 8px 2px ${widgetShadowColor}` : '';
 
 			const borderColor = this.getColor(NOTIFICATIONS_CENTER_BORDER);
 			this.notificationsCenterContainer.style.border = borderColor ? `1px solid ${borderColor}` : '';
@@ -444,17 +453,18 @@ export class NotificationsCenter extends Themable implements INotificationsCente
 	}
 
 	clearAll(): void {
+		const surface = this.isVisible ? 'center' : undefined;
 
 		// Hide notifications center first
 		this.hide();
 
 		// Close all
 		for (const notification of [...this.model.notifications] /* copy array since we modify it from closing */) {
-			if (!notification.hasProgress) {
+			if (!notification.hasActiveProgress) {
+				logNotificationInteraction(this.telemetryService, notification, 'clearAll', surface);
 				notification.close();
 			}
 			this.accessibilitySignalService.playSignal(AccessibilitySignal.clear);
 		}
 	}
 }
-

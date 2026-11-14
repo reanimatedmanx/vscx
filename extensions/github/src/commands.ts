@@ -4,11 +4,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { API as GitAPI, RefType, Repository } from './typings/git.js';
+import { RefType } from './typings/git.constants.js';
+import type { API as GitAPI, Repository } from './typings/git.d.ts';
 import { publishRepository } from './publish.js';
 import { DisposableStore, getRepositoryFromUrl } from './util.js';
 import { LinkContext, getCommitLink, getLink, getVscodeDevHost } from './links.js';
-import { getOctokit } from './auth.js';
+import { GitHubService } from './auth.js';
 
 async function copyVscodeDevLink(gitAPI: GitAPI, useSelection: boolean, context: LinkContext, includeRange = true) {
 	try {
@@ -90,28 +91,6 @@ function resolveSessionRepo(gitAPI: GitAPI, sessionMetadata: { worktreePath?: st
 	return { repository, remoteInfo, gitRemote: { name: gitRemote.name, fetchUrl: gitRemote.fetchUrl! }, head: head as ResolvedSessionRepo['head'] };
 }
 
-async function checkOpenPullRequest(gitAPI: GitAPI, _sessionResource: vscode.Uri | undefined, sessionMetadata: { worktreePath?: string } | undefined): Promise<void> {
-	const resolved = resolveSessionRepo(gitAPI, sessionMetadata, false);
-	if (!resolved) {
-		vscode.commands.executeCommand('setContext', 'github.hasOpenPullRequest', false);
-		return;
-	}
-
-	try {
-		const octokit = await getOctokit();
-		const { data: openPRs } = await octokit.pulls.list({
-			owner: resolved.remoteInfo.owner,
-			repo: resolved.remoteInfo.repo,
-			head: `${resolved.remoteInfo.owner}:${resolved.head.name}`,
-			state: 'all',
-		});
-
-		vscode.commands.executeCommand('setContext', 'github.hasOpenPullRequest', openPRs.length > 0);
-	} catch {
-		vscode.commands.executeCommand('setContext', 'github.hasOpenPullRequest', false);
-	}
-}
-
 async function createPullRequest(gitAPI: GitAPI, sessionResource: vscode.Uri | undefined, sessionMetadata: { worktreePath?: string } | undefined): Promise<void> {
 	if (!sessionResource) {
 		return;
@@ -146,17 +125,15 @@ async function createPullRequest(gitAPI: GitAPI, sessionResource: vscode.Uri | u
 	vscode.env.openExternal(vscode.Uri.parse(prUrl));
 }
 
-async function openPullRequest(gitAPI: GitAPI, _sessionResource: vscode.Uri | undefined, sessionMetadata: { worktreePath?: string } | undefined): Promise<void> {
+async function openPullRequest(gitAPI: GitAPI, githubService: GitHubService, _sessionResource: vscode.Uri | undefined, sessionMetadata: { worktreePath?: string } | undefined): Promise<void> {
 	const resolved = resolveSessionRepo(gitAPI, sessionMetadata, true);
 	if (!resolved) {
 		return;
 	}
 
 	try {
-		const octokit = await getOctokit();
-		const { data: pullRequests } = await octokit.pulls.list({
-			owner: resolved.remoteInfo.owner,
-			repo: resolved.remoteInfo.repo,
+		const client = await githubService.getClient();
+		const pullRequests = await client.pullRequests.list(resolved.remoteInfo, {
 			head: `${resolved.remoteInfo.owner}:${resolved.head.name}`,
 			state: 'all',
 		});
@@ -197,12 +174,12 @@ async function openOnGitHub(repository: Repository, commit: string): Promise<voi
 	vscode.env.openExternal(vscode.Uri.parse(link));
 }
 
-export function registerCommands(gitAPI: GitAPI): vscode.Disposable {
+export function registerCommands(gitAPI: GitAPI, githubService: GitHubService): vscode.Disposable {
 	const disposables = new DisposableStore();
 
 	disposables.add(vscode.commands.registerCommand('github.publish', async () => {
 		try {
-			publishRepository(gitAPI);
+			publishRepository(gitAPI, githubService);
 		} catch (err) {
 			vscode.window.showErrorMessage(err.message);
 		}
@@ -260,11 +237,7 @@ export function registerCommands(gitAPI: GitAPI): vscode.Disposable {
 	}));
 
 	disposables.add(vscode.commands.registerCommand('github.openPullRequest', async (sessionResource: vscode.Uri | undefined, sessionMetadata: { worktreePath?: string } | undefined) => {
-		return openPullRequest(gitAPI, sessionResource, sessionMetadata);
-	}));
-
-	disposables.add(vscode.commands.registerCommand('github.checkOpenPullRequest', async (sessionResource: vscode.Uri | undefined, sessionMetadata: { worktreePath?: string } | undefined) => {
-		return checkOpenPullRequest(gitAPI, sessionResource, sessionMetadata);
+		return openPullRequest(gitAPI, githubService, sessionResource, sessionMetadata);
 	}));
 
 	return disposables;

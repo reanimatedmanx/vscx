@@ -6,6 +6,7 @@
 import * as fs from 'fs';
 import { exec } from 'child_process';
 import { timeout } from '../../../base/common/async.js';
+import { encodeHex, VSBuffer } from '../../../base/common/buffer.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { Disposable, toDisposable } from '../../../base/common/lifecycle.js';
 import * as path from '../../../base/common/path.js';
@@ -31,7 +32,7 @@ const enum ShutdownConstants {
 	 * on Windows under conpty, killing a process while data is being output will cause the [conhost
 	 * flush to hang the pty host][2] because [conhost should be hosted on another thread][3].
 	 *
-	 * [1]: https://github.com/Tyriar/node-pty/issues/72
+	 * [1]: https://github.com/microsoft/node-pty/issues/72
 	 * [2]: https://github.com/microsoft/vscode/issues/71966
 	 * [3]: https://github.com/microsoft/node-pty/pull/415
 	 */
@@ -69,6 +70,11 @@ const posixShellTypeMap = new Map<string, PosixShellType>([
 ]);
 
 const generalShellTypeMap = new Map<string, GeneralShellType>([
+	['claude', GeneralShellType.Claude],
+	['codex', GeneralShellType.Codex],
+	['commandcode', GeneralShellType.CommandCode],
+	['copilot', GeneralShellType.Copilot],
+	['gemini', GeneralShellType.Gemini],
 	['pwsh', GeneralShellType.PowerShell],
 	['powershell', GeneralShellType.PowerShell],
 	['python', GeneralShellType.Python],
@@ -99,6 +105,7 @@ export class TerminalProcess extends Disposable implements ITerminalChildProcess
 	private _exitMessage: string | undefined;
 	private _closeTimeout: Timeout | undefined;
 	private _ptyProcess: IPty | undefined;
+	private _parentWindow: VSBuffer | undefined;
 	private _currentTitle: string = '';
 	private _processStartupComplete: Promise<void> | undefined;
 	private _windowsShellHelper: WindowsShellHelper | undefined;
@@ -306,10 +313,18 @@ export class TerminalProcess extends Disposable implements ITerminalChildProcess
 	): Promise<void> {
 		const args = shellIntegrationInjection?.newArgs || shellLaunchConfig.args || [];
 		await this._throttleKillSpawn();
+		// Validation or spawn throttling can finish after the terminal was disposed.
+		if (this._store.isDisposed) {
+			return;
+		}
 		const sanitizedOptions = { ...options, env: sanitizeEnvForLogging(options.env as IProcessEnvironment | undefined) };
 		this._logService.trace('node-pty.IPty#spawn', shellLaunchConfig.executable, args, sanitizedOptions);
 		const ptyProcess = spawn(shellLaunchConfig.executable!, args, options);
 		this._ptyProcess = ptyProcess;
+		// node-pty only launches the shell after spawn() returns, so this is sent before it starts
+		if (this._parentWindow !== undefined) {
+			this._sendParentWindow(ptyProcess, this._parentWindow);
+		}
 		this._childProcessMonitor = this._register(new ChildProcessMonitor(ptyProcess.pid, this._logService));
 		this._register(this._childProcessMonitor.onDidChangeHasChildProcesses(value => this._onDidChangeProperty.fire({ type: ProcessPropertyType.HasChildProcesses, value })));
 		this._processStartupComplete = new Promise<void>(c => {
@@ -337,7 +352,20 @@ export class TerminalProcess extends Disposable implements ITerminalChildProcess
 			this._exitCode = e.exitCode;
 			this._queueProcessExit();
 		}));
-		this._sendProcessId(ptyProcess.pid);
+		// node-pty >= 1.2.0-beta.11 defers conptyNative.connect() on Windows, so
+		// ptyProcess.pid may be 0 immediately after spawn. In that case we wait
+		// for the first data event which only fires after the connection completes
+		// and the real pid is available. See microsoft/node-pty#885.
+		if (ptyProcess.pid > 0) {
+			this._sendProcessId(ptyProcess.pid);
+		} else {
+			const dataListener = ptyProcess.onData(() => {
+				dataListener.dispose();
+				this._childProcessMonitor?.setPid(ptyProcess.pid);
+				this._sendProcessId(ptyProcess.pid);
+			});
+			this._register(dataListener);
+		}
 		this._setupTitlePolling(ptyProcess);
 	}
 
@@ -355,7 +383,7 @@ export class TerminalProcess extends Disposable implements ITerminalChildProcess
 	}
 
 	// Allow any trailing data events to be sent before the exit event is sent.
-	// See https://github.com/Tyriar/node-pty/issues/72
+	// See https://github.com/microsoft/node-pty/issues/72
 	private _queueProcessExit() {
 		if (this._logService.getLevel() === LogLevel.Trace) {
 			this._logService.trace('TerminalProcess#_queueProcessExit', new Error().stack?.replace(/^Error/, ''));
@@ -391,7 +419,7 @@ export class TerminalProcess extends Disposable implements ITerminalChildProcess
 		this.dispose();
 	}
 
-	private async _throttleKillSpawn(): Promise<void> {
+	protected async _throttleKillSpawn(): Promise<void> {
 		// Only throttle on Windows/conpty
 		if (!isWindows || !hasConptyOption(this._ptyOptions) || !this._ptyOptions.useConpty) {
 			return;
@@ -556,6 +584,28 @@ export class TerminalProcess extends Disposable implements ITerminalChildProcess
 
 	clearBuffer(): void {
 		this._ptyProcess?.clear();
+	}
+
+	setParentWindow(handle: VSBuffer): void {
+		if (!hasConptyOption(this._ptyOptions) || !this._ptyOptions.useConptyDll) {
+			return;
+		}
+		// Also sent right after spawn when the pty hasn't started yet
+		this._parentWindow = handle;
+		if (this._ptyProcess) {
+			this._sendParentWindow(this._ptyProcess, handle);
+		}
+	}
+
+	private _sendParentWindow(ptyProcess: IPty, handle: VSBuffer): void {
+		try {
+			// The HWND bytes as Electron's getNativeWindowHandle() returned them, which node-pty takes as is
+			const sent = ptyProcess.setParentWindow?.(Buffer.from(handle.buffer));
+			this._logService.trace('node-pty.IPty#setParentWindow', encodeHex(handle), sent);
+		} catch (e) {
+			// This also runs right after spawn, so never let it fail the launch
+			this._logService.warn('node-pty.IPty#setParentWindow failed', encodeHex(handle), e);
+		}
 	}
 
 	acknowledgeDataEvent(charCount: number): void {

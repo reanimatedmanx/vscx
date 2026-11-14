@@ -6,12 +6,11 @@
 import es from 'event-stream';
 import Vinyl from 'vinyl';
 import vfs from 'vinyl-fs';
-import filter from 'gulp-filter';
-import gzip from 'gulp-gzip';
+import { filter, gzip, azureStorage } from '../lib/gulp/facade.ts';
 import mime from 'mime';
 import { ClientAssertionCredential } from '@azure/identity';
 import { VinylStat } from '../lib/util.ts';
-import azure from 'gulp-azure-storage';
+import { getWebCdnConfiguration, validateMobileWebCdnIdentity } from './web/cdnConfiguration.ts';
 
 const commit = process.env['BUILD_SOURCEVERSION'];
 const credential = new ClientAssertionCredential(process.env['AZURE_TENANT_ID']!, process.env['AZURE_CLIENT_ID']!, () => Promise.resolve(process.env['AZURE_ID_TOKEN']!));
@@ -76,29 +75,33 @@ function wait(stream: es.ThroughStream): Promise<void> {
 }
 
 async function main(): Promise<void> {
+	const configuration = getWebCdnConfiguration(process.argv.slice(2), process.env.VSCODE_QUALITY, commit);
+	if (configuration.mobile) {
+		await validateMobileWebCdnIdentity(configuration.source, process.env.VSCODE_QUALITY!, commit!);
+	}
 	const files: string[] = [];
 	const options = (compressed: boolean) => ({
 		account: process.env.AZURE_STORAGE_ACCOUNT,
 		credential,
 		container: '$web',
-		prefix: `${process.env.VSCODE_QUALITY}/${commit}/`,
+		prefix: configuration.prefix,
 		contentSettings: {
 			contentEncoding: compressed ? 'gzip' : undefined,
 			cacheControl: 'max-age=31536000, public'
 		}
 	});
 
-	const all = vfs.src('**', { cwd: '../vscode-web', base: '../vscode-web', dot: true })
+	const all = vfs.src(configuration.patterns, { cwd: configuration.source, base: configuration.source, dot: true })
 		.pipe(filter(f => !f.isDirectory()));
 
 	const compressed = all
 		.pipe(filter(f => MimeTypesToCompress.has(mime.lookup(f.path))))
 		.pipe(gzip({ append: false }))
-		.pipe(azure.upload(options(true)));
+		.pipe(azureStorage.upload(options(true)));
 
 	const uncompressed = all
 		.pipe(filter(f => !MimeTypesToCompress.has(mime.lookup(f.path))))
-		.pipe(azure.upload(options(false)));
+		.pipe(azureStorage.upload(options(false)));
 
 	const out = es.merge(compressed, uncompressed)
 		.pipe(es.through(function (f) {
@@ -118,7 +121,7 @@ async function main(): Promise<void> {
 
 	const filesOut = es.readArray([listing])
 		.pipe(gzip({ append: false }))
-		.pipe(azure.upload(options(true)));
+		.pipe(azureStorage.upload(options(true)));
 
 	console.log(`Uploading: files.txt (${files.length} files)`); // debug
 	await wait(filesOut);

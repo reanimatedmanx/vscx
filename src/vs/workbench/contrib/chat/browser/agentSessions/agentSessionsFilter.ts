@@ -17,7 +17,13 @@ import { IAgentSessionsFilter, IAgentSessionsFilterExcludes } from './agentSessi
 
 export enum AgentSessionsGrouping {
 	Capped = 'capped',
-	Date = 'date'
+	Date = 'date',
+	Repository = 'repository'
+}
+
+export enum AgentSessionsSorting {
+	Created = 'created',
+	Updated = 'updated'
 }
 
 export interface IAgentSessionsFilterOptions extends Partial<IAgentSessionsFilter> {
@@ -36,12 +42,10 @@ export interface IAgentSessionsFilterOptions extends Partial<IAgentSessionsFilte
 	 */
 	readonly providerLabelOverrides?: ReadonlyMap<string, string>;
 
-	readonly limitResults?: () => number | undefined;
 	notifyResults?(count: number): void;
 
 	readonly groupResults?: () => AgentSessionsGrouping | undefined;
-
-	overrideExclude?(session: IAgentSession): boolean | undefined;
+	readonly sortResults?: () => AgentSessionsSorting | undefined;
 }
 
 const DEFAULT_EXCLUDES: IAgentSessionsFilterExcludes = Object.freeze({
@@ -49,20 +53,24 @@ const DEFAULT_EXCLUDES: IAgentSessionsFilterExcludes = Object.freeze({
 	states: [] as const,
 	archived: true as const /* archived are never excluded but toggle between expanded and collapsed */,
 	read: false as const,
+	automation: true as const,
+	repositoryGroupCapped: true as const /* when true, repo groups are capped at a limit with a "show more" item */,
 });
 
 export class AgentSessionsFilter extends Disposable implements Required<IAgentSessionsFilter> {
 
 	private readonly STORAGE_KEY = `agentSessions.filterExcludes.agentsessionsviewerfiltersubmenu`;
+	private readonly SORTING_STORAGE_KEY = `agentSessions.sorting`;
 
 	private readonly _onDidChange = this._register(new Emitter<void>());
 	readonly onDidChange = this._onDidChange.event;
 
-	readonly limitResults = () => this.options.limitResults?.();
 	readonly groupResults = () => this.options.groupResults?.();
+	readonly sortResults = (): AgentSessionsSorting | undefined => this.options.sortResults?.() ?? this.currentSorting;
 
 	private excludes = DEFAULT_EXCLUDES;
 	private isStoringExcludes = false;
+	private currentSorting: AgentSessionsSorting = AgentSessionsSorting.Created;
 
 	private readonly actionDisposables = this._register(new DisposableStore());
 
@@ -73,6 +81,7 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 	) {
 		super();
 
+		this.restoreSorting();
 		this.updateExcludes(false);
 
 		this.registerListeners();
@@ -90,7 +99,7 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 			const excludedTypesRaw = this.storageService.get(this.STORAGE_KEY, StorageScope.PROFILE);
 			if (excludedTypesRaw) {
 				try {
-					this.excludes = JSON.parse(excludedTypesRaw) as IAgentSessionsFilterExcludes;
+					this.excludes = { ...DEFAULT_EXCLUDES, ...JSON.parse(excludedTypesRaw) as Partial<IAgentSessionsFilterExcludes> };
 				} catch {
 					this.excludes = { ...DEFAULT_EXCLUDES };
 				}
@@ -123,6 +132,24 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 		}
 	}
 
+	private restoreSorting(): void {
+		const storedSorting = this.storageService.get(this.SORTING_STORAGE_KEY, StorageScope.PROFILE);
+		if (storedSorting && Object.values(AgentSessionsSorting).includes(storedSorting as AgentSessionsSorting)) {
+			this.currentSorting = storedSorting as AgentSessionsSorting;
+		}
+	}
+
+	setSorting(sorting: AgentSessionsSorting): void {
+		if (this.currentSorting === sorting) {
+			return;
+		}
+
+		this.currentSorting = sorting;
+		this.storageService.store(this.SORTING_STORAGE_KEY, sorting, StorageScope.PROFILE, StorageTarget.USER);
+		this.updateFilterActions();
+		this._onDidChange.fire();
+	}
+
 	private updateFilterActions(): void {
 		this.actionDisposables.clear();
 
@@ -131,11 +158,52 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 			return;
 		}
 
+		this.registerSortActions(this.actionDisposables, menuId);
 		this.registerProviderActions(this.actionDisposables, menuId);
 		this.registerStateActions(this.actionDisposables, menuId);
 		this.registerArchivedActions(this.actionDisposables, menuId);
 		this.registerReadActions(this.actionDisposables, menuId);
+		this.registerAutomationActions(this.actionDisposables, menuId);
 		this.registerResetAction(this.actionDisposables, menuId);
+	}
+
+	private registerSortActions(disposables: DisposableStore, menuId: MenuId): void {
+		const that = this;
+		disposables.add(registerAction2(class extends Action2 {
+			constructor() {
+				super({
+					id: `agentSessions.filter.sortByCreated.${menuId.id.toLowerCase()}`,
+					title: localize('agentSessions.filter.sortByCreated', 'Sort by Created'),
+					menu: {
+						id: menuId,
+						group: '0_sort',
+						order: 0,
+					},
+					toggled: that.currentSorting === AgentSessionsSorting.Created ? ContextKeyExpr.true() : ContextKeyExpr.false(),
+				});
+			}
+			run(): void {
+				that.setSorting(AgentSessionsSorting.Created);
+			}
+		}));
+
+		disposables.add(registerAction2(class extends Action2 {
+			constructor() {
+				super({
+					id: `agentSessions.filter.sortByUpdated.${menuId.id.toLowerCase()}`,
+					title: localize('agentSessions.filter.sortByUpdated', 'Sort by Updated'),
+					menu: {
+						id: menuId,
+						group: '0_sort',
+						order: 1,
+					},
+					toggled: that.currentSorting === AgentSessionsSorting.Updated ? ContextKeyExpr.true() : ContextKeyExpr.false(),
+				});
+			}
+			run(): void {
+				that.setSorting(AgentSessionsSorting.Updated);
+			}
+		}));
 	}
 
 	private registerProviderActions(disposables: DisposableStore, menuId: MenuId): void {
@@ -156,12 +224,13 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 			// Default: Local + all registered contributions
 			providers = [{ id: AgentSessionProviders.Local, label: resolveLabel(AgentSessionProviders.Local) }];
 			for (const contribution of this.chatSessionsService.getAllChatSessionContributions()) {
-				if (providers.find(p => p.id === contribution.type)) {
+				const id = contribution.sessionListGroup ?? contribution.type;
+				if (providers.find(p => p.id === id)) {
 					continue; // already added
 				}
 				providers.push({
-					id: contribution.type,
-					label: resolveLabel(contribution.type)
+					id,
+					label: resolveLabel(id)
 				});
 			}
 		}
@@ -198,7 +267,7 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 		const states: { id: AgentSessionStatus; label: string }[] = [
 			{ id: AgentSessionStatus.Completed, label: localize('agentSessionStatus.completed', "Completed") },
 			{ id: AgentSessionStatus.InProgress, label: localize('agentSessionStatus.inProgress', "In Progress") },
-			{ id: AgentSessionStatus.NeedsInput, label: localize('agentSessionStatus.needsInput', "Input Needed") },
+			{ id: AgentSessionStatus.NeedsInput, label: localize('agentSessionStatus.needsInput', "Attention Needed") },
 			{ id: AgentSessionStatus.Failed, label: localize('agentSessionStatus.failed', "Failed") },
 		];
 
@@ -272,6 +341,36 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 		}));
 	}
 
+	private registerAutomationActions(disposables: DisposableStore, menuId: MenuId): void {
+		const that = this;
+		disposables.add(registerAction2(class extends Action2 {
+			constructor() {
+				super({
+					id: `agentSessions.filter.toggleExcludeAutomation.${menuId.id.toLowerCase()}`,
+					title: localize('agentSessions.filter.automation', "Automations"),
+					menu: {
+						id: menuId,
+						group: '3_props',
+						order: 1,
+					},
+					toggled: that.excludes.automation ? ContextKeyExpr.false() : ContextKeyExpr.true(),
+				});
+			}
+			run(): void {
+				that.storeExcludes({ ...that.excludes, automation: !that.excludes.automation });
+			}
+		}));
+	}
+
+	/**
+	 * Programmatically toggle the repository group capping state.
+	 */
+	setRepositoryGroupCapped(capped: boolean): void {
+		if (this.excludes.repositoryGroupCapped !== capped) {
+			this.storeExcludes({ ...this.excludes, repositoryGroupCapped: capped });
+		}
+	}
+
 	private registerResetAction(disposables: DisposableStore, menuId: MenuId): void {
 		const that = this;
 		disposables.add(registerAction2(class extends Action2 {
@@ -287,13 +386,13 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 				});
 			}
 			run(): void {
-				that.storeExcludes({ ...DEFAULT_EXCLUDES });
+				that.reset();
 			}
 		}));
 	}
 
 	isDefault(): boolean {
-		return equals(this.excludes, DEFAULT_EXCLUDES);
+		return equals(this.excludes, DEFAULT_EXCLUDES) && this.currentSorting === AgentSessionsSorting.Created;
 	}
 
 	getExcludes(): IAgentSessionsFilterExcludes {
@@ -301,12 +400,12 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 	}
 
 	exclude(session: IAgentSession): boolean {
-		const overrideExclude = this.options?.overrideExclude?.(session);
-		if (typeof overrideExclude === 'boolean') {
-			return overrideExclude;
+		const providerFilter = this.chatSessionsService.getChatSessionContribution(session.providerType)?.sessionListGroup ?? session.providerType;
+		if (this.options.allowedProviders && !this.options.allowedProviders.includes(providerFilter as AgentSessionProviders)) {
+			return true;
 		}
 
-		if (this.options.allowedProviders && !this.options.allowedProviders.includes(session.providerType as AgentSessionProviders)) {
+		if (this.excludes.automation && session.metadata?.isAutomation === true) {
 			return true;
 		}
 
@@ -314,7 +413,7 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 			return true;
 		}
 
-		if (this.excludes.providers.includes(session.providerType)) {
+		if (this.excludes.providers.includes(providerFilter)) {
 			return true;
 		}
 
@@ -331,5 +430,12 @@ export class AgentSessionsFilter extends Disposable implements Required<IAgentSe
 
 	notifyResults(count: number): void {
 		this.options.notifyResults?.(count);
+	}
+
+	reset(): void {
+		this.storeExcludes({ ...DEFAULT_EXCLUDES });
+		if (this.currentSorting !== AgentSessionsSorting.Created) {
+			this.setSorting(AgentSessionsSorting.Created);
+		}
 	}
 }

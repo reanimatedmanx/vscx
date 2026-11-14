@@ -7,15 +7,15 @@ import { localize } from '../../../../../../nls.js';
 import { URI } from '../../../../../../base/common/uri.js';
 import { Codicon } from '../../../../../../base/common/codicons.js';
 import { ThemeIcon } from '../../../../../../base/common/themables.js';
-import { AgentFileType, IExtensionPromptPath, IPromptPath, IPromptsService, PromptsStorage } from '../../../common/promptSyntax/service/promptsService.js';
-import { dirname, extUri, joinPath } from '../../../../../../base/common/resources.js';
+import { AgentInstructionFileType, IExtensionPromptPath, IPromptPath, IPromptsService, PromptsStorage } from '../../../common/promptSyntax/service/promptsService.js';
+import { basename, dirname, extUri, joinPath } from '../../../../../../base/common/resources.js';
 import { DisposableStore } from '../../../../../../base/common/lifecycle.js';
 import { IFileService } from '../../../../../../platform/files/common/files.js';
 import { IOpenerService } from '../../../../../../platform/opener/common/opener.js';
 import { IDialogService } from '../../../../../../platform/dialogs/common/dialogs.js';
 import { ICommandService } from '../../../../../../platform/commands/common/commands.js';
-import { getCleanPromptName } from '../../../common/promptSyntax/config/promptFileLocations.js';
-import { PromptsType, INSTRUCTIONS_DOCUMENTATION_URL, AGENT_DOCUMENTATION_URL, PROMPT_DOCUMENTATION_URL, SKILL_DOCUMENTATION_URL, HOOK_DOCUMENTATION_URL } from '../../../common/promptSyntax/promptTypes.js';
+import { getCleanPromptName, getSkillFolderName } from '../../../common/promptSyntax/config/promptFileLocations.js';
+import { getDocumentationUrl, PromptsType } from '../../../common/promptSyntax/promptTypes.js';
 import { NEW_PROMPT_COMMAND_ID, NEW_INSTRUCTIONS_COMMAND_ID, NEW_AGENT_COMMAND_ID, NEW_SKILL_COMMAND_ID } from '../newPromptFileActions.js';
 import { GENERATE_AGENT_INSTRUCTIONS_COMMAND_ID, GENERATE_ON_DEMAND_INSTRUCTIONS_COMMAND_ID, GENERATE_PROMPT_COMMAND_ID, GENERATE_SKILL_COMMAND_ID, GENERATE_AGENT_COMMAND_ID } from '../../actions/chatActions.js';
 import { IKeyMods, IQuickInputButton, IQuickInputService, IQuickPick, IQuickPickItem, IQuickPickItemButtonEvent, IQuickPickSeparator } from '../../../../../../platform/quickinput/common/quickInput.js';
@@ -54,6 +54,7 @@ export interface ISelectOptions {
 	readonly optionRename?: boolean;
 	readonly optionCopy?: boolean;
 	readonly optionVisibility?: boolean;
+	readonly optionRun?: boolean;
 }
 
 export interface ISelectPromptResult {
@@ -73,35 +74,36 @@ export interface ISelectPromptResult {
  */
 function newHelpButton(type: PromptsType): IQuickInputButton & { helpURI: URI } {
 	const iconClass = ThemeIcon.asClassName(Codicon.question);
+	const helpURI = URI.parse(getDocumentationUrl(type));
 	switch (type) {
 		case PromptsType.prompt:
 			return {
 				tooltip: localize('help.prompt', "Show help on prompt files"),
-				helpURI: URI.parse(PROMPT_DOCUMENTATION_URL),
+				helpURI,
 				iconClass
 			};
 		case PromptsType.instructions:
 			return {
 				tooltip: localize('help.instructions', "Show help on instruction files"),
-				helpURI: URI.parse(INSTRUCTIONS_DOCUMENTATION_URL),
+				helpURI,
 				iconClass
 			};
 		case PromptsType.agent:
 			return {
 				tooltip: localize('help.agent', "Show help on custom agent files"),
-				helpURI: URI.parse(AGENT_DOCUMENTATION_URL),
+				helpURI,
 				iconClass
 			};
 		case PromptsType.skill:
 			return {
 				tooltip: localize('help.skill', "Show help on skill files"),
-				helpURI: URI.parse(SKILL_DOCUMENTATION_URL),
+				helpURI,
 				iconClass
 			};
 		case PromptsType.hook:
 			return {
 				tooltip: localize('help.hook', "Show help on hook files"),
-				helpURI: URI.parse(HOOK_DOCUMENTATION_URL),
+				helpURI,
 				iconClass
 			};
 	}
@@ -323,6 +325,11 @@ const MAKE_INVISIBLE_BUTTON: IQuickInputButton = {
 	iconClass: ThemeIcon.asClassName(Codicon.eye),
 };
 
+const RUN_IN_CHAT_BUTTON: IQuickInputButton = {
+	tooltip: localize('runInChat', "Run in Chat View"),
+	iconClass: ThemeIcon.asClassName(Codicon.play),
+};
+
 export class PromptFilePickers {
 	constructor(
 		@IQuickInputService private readonly _quickInputService: IQuickInputService,
@@ -425,6 +432,9 @@ export class PromptFilePickers {
 
 	private async _createPromptPickItems(options: ISelectOptions, token: CancellationToken): Promise<(IPromptPickerQuickPickItem | IQuickPickSeparator)[]> {
 		const buttons: IQuickInputButton[] = [];
+		if (options.type === PromptsType.prompt && options.optionRun !== false) {
+			buttons.push(RUN_IN_CHAT_BUTTON);
+		}
 		if (options.optionEdit !== false) {
 			buttons.push(EDIT_BUTTON);
 		}
@@ -466,7 +476,7 @@ export class PromptFilePickers {
 				// Don't show the folder path for files under .github folder (namely, copilot-instructions.md) since that is only defined once per repo.
 				return {
 					uri: agentInstructionFile.uri,
-					description: agentInstructionFile.type !== AgentFileType.copilotInstructionsMd ? folderName : undefined,
+					description: agentInstructionFile.type !== AgentInstructionFileType.copilotInstructionsMd ? folderName : undefined,
 					storage: PromptsStorage.local,
 					type: options.type
 				} satisfies IPromptPath;
@@ -481,6 +491,9 @@ export class PromptFilePickers {
 		const exts = (await this._promptsService.listPromptFilesForStorage(options.type, PromptsStorage.extension, token)).filter(isExtensionPromptPath);
 		if (exts.length) {
 			const extButtons: IQuickInputButton[] = [];
+			if (options.type === PromptsType.prompt && options.optionRun !== false) {
+				extButtons.push(RUN_IN_CHAT_BUTTON);
+			}
 			if (options.optionEdit !== false) {
 				extButtons.push(EDIT_BUTTON);
 			}
@@ -519,6 +532,7 @@ export class PromptFilePickers {
 			result.push({ type: 'separator', label: localize('separator.plugins', "Plugins") });
 			result.push(...sortByLabel(await Promise.all(plugins.map(p => this._createPromptPickItem(p, pluginButtons, getVisibility(p), token)))));
 		}
+
 		return result;
 	}
 
@@ -549,7 +563,7 @@ export class PromptFilePickers {
 
 	private async _createPromptPickItem(promptFile: IPromptPath, buttons: IQuickInputButton[] | undefined, visibility: boolean | undefined, token: CancellationToken): Promise<IPromptPickerQuickPickItem> {
 		const parsedPromptFile = await this._promptsService.parseNew(promptFile.uri, token).catch(() => undefined);
-		let promptName = parsedPromptFile?.header?.name ?? promptFile.name ?? getCleanPromptName(promptFile.uri);
+		let promptName = (parsedPromptFile?.header?.name ?? promptFile.name) || (promptFile.type === PromptsType.skill ? getSkillFolderName(promptFile.uri) : getCleanPromptName(promptFile.uri));
 		const promptDescription = parsedPromptFile?.header?.description ?? promptFile.description;
 
 		let tooltip: string | undefined;
@@ -566,6 +580,9 @@ export class PromptFilePickers {
 				break;
 			case PromptsStorage.plugin:
 				tooltip = promptFile.name;
+				break;
+			case PromptsStorage.builtIn:
+				tooltip = undefined;
 				break;
 			default:
 				assertNever(promptFile);
@@ -613,6 +630,15 @@ export class PromptFilePickers {
 		}
 		const value = item.promptFileUri;
 
+		if (button === RUN_IN_CHAT_BUTTON) {
+			const commandId = quickPick.keyMods.ctrlCmd === true
+				? 'workbench.action.chat.run-in-new-chat.prompt.current'
+				: 'workbench.action.chat.run.prompt.current';
+			await this._commandService.executeCommand(commandId, value);
+			quickPick.hide();
+			return false;
+		}
+
 		// `edit` button was pressed, open the prompt file in editor
 		if (button === EDIT_BUTTON) {
 			await this._openerService.open(value);
@@ -651,16 +677,23 @@ export class PromptFilePickers {
 			// don't close the main prompt selection dialog by the confirmation dialog
 			return await this.keepQuickPickOpen(quickPick, async () => {
 
-				const filename = getCleanPromptName(value);
-				const message = localize('commands.prompts.use.select-dialog.delete-prompt.confirm.message', "Are you sure you want to delete '{0}'?", filename);
+				const isSkill = options.type === PromptsType.skill;
+				// For skills, use the parent folder name as the display name
+				// since skills are structured as <skillname>/SKILL.md.
+				const filename = isSkill ? basename(dirname(value)) : item.label;
+				const message = isSkill
+					? localize('commands.prompts.use.select-dialog.delete-skill.confirm.message', "Are you sure you want to delete skill '{0}' and its folder?", filename)
+					: localize('commands.prompts.use.select-dialog.delete-prompt.confirm.message', "Are you sure you want to delete '{0}'?", filename);
 				const { confirmed } = await this._dialogService.confirm({ message });
 				// if prompt deletion was not confirmed, nothing to do
 				if (!confirmed) {
 					return false;
 				}
 
-				// prompt deletion was confirmed so delete the prompt file
-				await this._fileService.del(value);
+				// For skills, delete the parent folder (e.g. .github/skills/my-skill/)
+				// since each skill is a folder containing SKILL.md.
+				const deleteTarget = isSkill ? dirname(value) : value;
+				await this._fileService.del(deleteTarget, { recursive: isSkill, useTrash: true });
 				return true;
 			});
 
@@ -703,7 +736,8 @@ export class PromptFilePickers {
 			optionDelete: true,
 			optionRename: true,
 			optionCopy: true,
-			optionVisibility: false
+			optionVisibility: false,
+			optionRun: false
 		};
 
 		try {

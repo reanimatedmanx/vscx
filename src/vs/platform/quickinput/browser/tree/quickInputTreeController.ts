@@ -117,6 +117,9 @@ export class QuickInputTreeController extends Disposable {
 				identityProvider: new QuickInputTreeIdentityProvider()
 			}
 		));
+		this._register(this._renderer.onDidDisposeFocusedElement(() => {
+			this._tree.domFocus();
+		}));
 		this.registerCheckboxStateListeners();
 		this.registerOnDidChangeFocus();
 	}
@@ -297,18 +300,23 @@ export class QuickInputTreeController extends Disposable {
 		}));
 
 		this._register(this._checkboxStateHandler.onDidChangeCheckboxState(e => {
-			this.updateCheckboxState(e.item, e.checked === true);
+			// Checkbox listeners can replace the tree items, so establish focus before notifying them.
+			this._tree.setFocus([e.item]);
+			this._tree.setSelection([e.item]);
+			this.updateCheckboxState(e.item, e.checked === true, true);
 		}));
 	}
 
-	private updateCheckboxState(item: IQuickTreeItem, newState: boolean): void {
+	private updateCheckboxState(item: IQuickTreeItem, newState: boolean, skipItemRerender = false): void {
 		if ((item.checked ?? false) === newState) {
 			return; // No change
 		}
 
 		// Handle checked item
 		item.checked = newState;
-		this._tree.rerender(item);
+		if (!skipItemRerender) {
+			this._tree.rerender(item);
+		}
 
 		// Handle children of the checked item
 		const updateSet = new Set<IQuickTreeItem>();

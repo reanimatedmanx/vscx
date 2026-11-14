@@ -9,7 +9,7 @@ import * as css from '../../cssValue.js';
 import { HighlightedLabel } from '../highlightedlabel/highlightedLabel.js';
 import { IHoverDelegate } from '../hover/hoverDelegate.js';
 import { IMatch } from '../../../common/filters.js';
-import { Disposable, IDisposable } from '../../../common/lifecycle.js';
+import { Disposable, DisposableStore, IDisposable } from '../../../common/lifecycle.js';
 import { equals } from '../../../common/objects.js';
 import { Range } from '../../../common/range.js';
 import { getDefaultHoverDelegate } from '../hover/hoverDelegateFactory.js';
@@ -42,6 +42,8 @@ export interface IIconLabelValueOptions {
 	readonly separator?: string;
 	readonly domId?: string;
 	iconPath?: URI | ThemeIcon;
+	/** The CSS color of its icon, such as of a theme icon with a color of its own. */
+	iconColor?: string;
 	supportIcons?: boolean;
 }
 
@@ -151,6 +153,10 @@ export class IconLabel extends Disposable {
 				labelClasses.push('strikethrough');
 			}
 
+			if (options.iconColor) {
+				labelClasses.push('colored-icon');
+			}
+
 			if (options.disabledCommand) {
 				containerClasses.push('disabled');
 			}
@@ -163,7 +169,7 @@ export class IconLabel extends Disposable {
 			}
 		}
 
-		// eslint-disable-next-line no-restricted-syntax
+		// eslint-disable-next-line eslint-js/no-restricted-syntax
 		const existingIconNode = this.domNode.element.querySelector('.monaco-icon-label-iconpath');
 		if (options?.iconPath) {
 			let iconNode;
@@ -178,6 +184,7 @@ export class IconLabel extends Disposable {
 				iconNode.className = `monaco-icon-label-iconpath ${iconClass}`;
 				iconNode.style.backgroundImage = '';
 			} else {
+				iconNode.className = 'monaco-icon-label-iconpath';
 				iconNode.style.backgroundImage = css.asCSSUrl(options?.iconPath);
 			}
 			iconNode.style.backgroundRepeat = 'no-repeat';
@@ -189,6 +196,11 @@ export class IconLabel extends Disposable {
 		}
 
 		this.domNode.classNames = labelClasses;
+		if (options?.iconColor) {
+			this.domNode.element.style.setProperty('--monaco-icon-label-icon-color', options.iconColor);
+		} else {
+			this.domNode.element.style.removeProperty('--monaco-icon-label-icon-color');
+		}
 		this.domNode.element.setAttribute('aria-label', ariaLabel);
 		this.labelContainer.classList.value = '';
 		this.labelContainer.classList.add(...containerClasses);
@@ -340,6 +352,7 @@ class LabelWithHighlights extends Disposable {
 	private label: string | string[] | undefined = undefined;
 	private singleLabel: HighlightedLabel | undefined = undefined;
 	private options: IIconLabelValueOptions | undefined;
+	private readonly _labelDisposables = this._register(new DisposableStore());
 
 	constructor(private container: HTMLElement, private supportIcons: boolean) {
 		super();
@@ -358,13 +371,15 @@ class LabelWithHighlights extends Disposable {
 
 		if (typeof label === 'string') {
 			if (!this.singleLabel) {
+				this._labelDisposables.clear();
 				this.container.textContent = '';
 				this.container.classList.remove('multiple');
-				this.singleLabel = this._register(new HighlightedLabel(dom.append(this.container, dom.$('a.label-name', { id: options?.domId }))));
+				this.singleLabel = this._labelDisposables.add(new HighlightedLabel(dom.append(this.container, dom.$('a.label-name', { id: options?.domId }))));
 			}
 
 			this.singleLabel.set(label, options?.matches, undefined, options?.labelEscapeNewLines, supportIcons);
 		} else {
+			this._labelDisposables.clear();
 			this.container.textContent = '';
 			this.container.classList.add('multiple');
 			this.singleLabel = undefined;
@@ -378,7 +393,7 @@ class LabelWithHighlights extends Disposable {
 				const id = options?.domId && `${options?.domId}_${i}`;
 
 				const name = dom.$('a.label-name', { id, 'data-icon-label-count': label.length, 'data-icon-label-index': i, 'role': 'treeitem' });
-				const highlightedLabel = this._register(new HighlightedLabel(dom.append(this.container, name)));
+				const highlightedLabel = this._labelDisposables.add(new HighlightedLabel(dom.append(this.container, name)));
 				highlightedLabel.set(l, m, undefined, options?.labelEscapeNewLines, supportIcons);
 
 				if (i < label.length - 1) {

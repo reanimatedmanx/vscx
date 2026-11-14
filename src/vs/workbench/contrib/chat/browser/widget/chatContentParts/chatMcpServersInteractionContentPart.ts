@@ -105,16 +105,18 @@ export class ChatMcpServersInteractionContentPart extends Disposable implements 
 
 	private createServerCommandLinks(servers: Array<{ id: string; label: string }>): string {
 		return servers.map(s => createMarkdownCommandLink({
-			title: '`' + escapeMarkdownSyntaxTokens(s.label) + '`',
+			text: '`' + escapeMarkdownSyntaxTokens(s.label) + '`',
 			id: McpCommandIds.ServerOptions,
 			arguments: [s.id],
+			tooltip: localize('mcp.server.options.tooltip', 'Show options for {0}', s.label),
 		}, false)).join(', ');
 	}
 
 	private updateDetailedProgress(state: IAutostartResult): void {
 		const skipText = createMarkdownCommandLink({
-			title: localize('mcp.skip.link', 'Skip?'),
+			text: localize('mcp.skip.link', 'Skip?'),
 			id: McpCommandIds.SkipCurrentAutostart,
+			tooltip: localize('mcp.skip.tooltip', 'Skip starting this MCP server'),
 		});
 
 		let content: MarkdownString;
@@ -139,6 +141,7 @@ export class ChatMcpServersInteractionContentPart extends Disposable implements 
 				undefined, // icon
 				undefined, // toolInvocation
 				false, // no shimmer for now
+				undefined, // isWorkingProgress
 			));
 			this.domNode.appendChild(this.workingProgressPart.domNode);
 		}
@@ -184,7 +187,7 @@ export class ChatMcpServersInteractionContentPart extends Disposable implements 
 			}
 		});
 
-		// eslint-disable-next-line no-restricted-syntax
+		// eslint-disable-next-line eslint-js/no-restricted-syntax
 		const startLink = [...messageMd.element.querySelectorAll('a')].find(a => !a.getAttribute('data-href')?.startsWith('command:'));
 		if (!startLink) {
 			// Should not happen
